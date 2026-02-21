@@ -31,7 +31,7 @@ func main() {
         log.Fatal(err)
     }
 
-    fmt.Println(result.State)     // "valid"
+    fmt.Println(result.State)     // "ok"
     fmt.Println(result.IsValid()) // true
 }
 ```
@@ -40,64 +40,73 @@ func main() {
 
 ### Validate
 
-Server-side email validation using your server API key.
+Email validation using your API key. Sends a `POST` to `/api/v1/verify_inline` with the email as a query parameter.
 
 ```go
 result, err := client.Validate(ctx, "user@example.com")
 ```
 
-### FormValidate
-
-Frontend email validation using your form API key. Requires `WithFormAPIKey` to be set.
-
-```go
-client := truelist.NewClient("server-key",
-    truelist.WithFormAPIKey("your-form-key"),
-)
-
-result, err := client.FormValidate(ctx, "user@example.com")
-```
-
 ### Account
 
-Retrieve account information.
+Retrieve account information via `GET /me`.
 
 ```go
 account, err := client.Account(ctx)
-fmt.Println(account.Email)   // "you@example.com"
-fmt.Println(account.Plan)    // "pro"
-fmt.Println(account.Credits) // 9542
+fmt.Println(account.Email)                // "you@example.com"
+fmt.Println(account.Name)                 // "Your Name"
+fmt.Println(account.Account.PaymentPlan)  // "pro"
 ```
 
 ## Result
 
 The `Result` struct contains the full validation response:
 
-| Field        | Type     | Description                                  |
-|-------------|----------|----------------------------------------------|
-| `State`      | `string` | `valid`, `invalid`, `risky`, or `unknown`    |
-| `SubState`   | `string` | Detailed sub-state (see below)               |
-| `Suggestion` | `string` | Suggested correction (e.g., typo fix)        |
-| `FreeEmail`  | `bool`   | Whether the email is from a free provider    |
-| `Role`       | `bool`   | Whether the email is a role address          |
-| `Disposable` | `bool`   | Whether the email is from a disposable provider |
+| Field        | Type      | JSON Field         | Description                                  |
+|-------------|-----------|-------------------|----------------------------------------------|
+| `Email`      | `string`  | `address`          | The email address validated                  |
+| `Domain`     | `string`  | `domain`           | The domain of the email                      |
+| `Canonical`  | `string`  | `canonical`        | The canonical (local) part of the email      |
+| `MxRecord`   | `*string` | `mx_record`        | MX record for the domain                    |
+| `FirstName`  | `*string` | `first_name`       | First name associated with the email         |
+| `LastName`   | `*string` | `last_name`        | Last name associated with the email          |
+| `State`      | `string`  | `email_state`      | `ok`, `email_invalid`, or `accept_all`       |
+| `SubState`   | `string`  | `email_sub_state`  | Detailed sub-state (see below)               |
+| `VerifiedAt` | `string`  | `verified_at`      | Timestamp of verification                    |
+| `Suggestion` | `*string` | `did_you_mean`     | Suggested correction (e.g., typo fix)        |
 
 ### Sub-States
 
-`ok`, `accept_all`, `disposable_address`, `role_address`, `failed_mx_check`, `failed_spam_trap`, `failed_no_mailbox`, `failed_greylisted`, `failed_syntax_check`, `unknown`
+`email_ok`, `is_disposable`, `is_role`, `unknown_error`, `failed_smtp_check`
 
 ### Result Predicates
 
 ```go
-result.IsValid()                       // state == "valid"
-result.IsValid(truelist.AllowRisky())  // state == "valid" || "risky"
-result.IsInvalid()                     // state == "invalid"
-result.IsRisky()                       // state == "risky"
-result.IsUnknown()                     // state == "unknown"
-result.IsFreeEmail()                   // free_email == true
-result.IsRole()                        // role == true
-result.IsDisposable()                  // disposable == true
+result.IsValid()      // State == "ok"
+result.IsInvalid()    // State == "email_invalid"
+result.IsAcceptAll()  // State == "accept_all"
+result.IsDisposable() // SubState == "is_disposable"
+result.IsRole()       // SubState == "is_role"
 ```
+
+## Account
+
+The `Account` struct contains account information:
+
+| Field         | Type          | Description                    |
+|--------------|---------------|--------------------------------|
+| `Email`       | `string`      | Account email                  |
+| `Name`        | `string`      | Account holder name            |
+| `UUID`        | `string`      | Account UUID                   |
+| `TimeZone`    | `string`      | Account time zone              |
+| `IsAdminRole` | `bool`        | Whether the user is an admin   |
+| `Account`     | `AccountInfo` | Nested account details         |
+
+The `AccountInfo` struct:
+
+| Field         | Type     | Description          |
+|--------------|----------|----------------------|
+| `Name`        | `string` | Organization name    |
+| `PaymentPlan` | `string` | Current payment plan |
 
 ## Configuration Options
 
@@ -106,7 +115,6 @@ result.IsDisposable()                  // disposable == true
 | `WithBaseURL`       | `https://api.truelist.io`     | Custom API base URL                      |
 | `WithTimeout`       | `30s`                         | HTTP client timeout                      |
 | `WithMaxRetries`    | `3`                           | Max retries for transient errors (429, 5xx) |
-| `WithFormAPIKey`    | (none)                        | Form API key for `FormValidate`          |
 | `WithHTTPClient`    | (default client)              | Custom `*http.Client`                    |
 
 ```go
@@ -114,7 +122,6 @@ client := truelist.NewClient("your-api-key",
     truelist.WithBaseURL("https://api.truelist.io"),
     truelist.WithTimeout(10 * time.Second),
     truelist.WithMaxRetries(2),
-    truelist.WithFormAPIKey("your-form-key"),
 )
 ```
 
@@ -170,7 +177,6 @@ package myapp
 
 import (
     "context"
-    "encoding/json"
     "net/http"
     "net/http/httptest"
     "testing"
@@ -181,10 +187,7 @@ import (
 func TestMyValidation(t *testing.T) {
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(truelist.Result{
-            State:    truelist.StateValid,
-            SubState: truelist.SubStateOK,
-        })
+        w.Write([]byte(`{"emails":[{"address":"user@example.com","domain":"example.com","canonical":"user","mx_record":null,"first_name":null,"last_name":null,"email_state":"ok","email_sub_state":"email_ok","verified_at":"2026-02-21T10:00:00.000Z","did_you_mean":null}]}`))
     }))
     defer srv.Close()
 
