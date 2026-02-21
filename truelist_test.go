@@ -25,38 +25,69 @@ func testServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *Clie
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name     string
-		response Result
+		response verifyResponse
+		want     Result
 		wantErr  bool
 	}{
 		{
 			name: "valid email",
-			response: Result{
-				State:      StateValid,
-				SubState:   SubStateOK,
-				FreeEmail:  true,
-				Role:       false,
-				Disposable: false,
+			response: verifyResponse{
+				Emails: []Result{
+					{
+						Email:      "user@example.com",
+						Domain:     "example.com",
+						Canonical:  "user",
+						State:      StateOK,
+						SubState:   SubStateEmailOK,
+						VerifiedAt: "2026-02-21T10:00:00.000Z",
+					},
+				},
+			},
+			want: Result{
+				Email:      "user@example.com",
+				Domain:     "example.com",
+				Canonical:  "user",
+				State:      StateOK,
+				SubState:   SubStateEmailOK,
+				VerifiedAt: "2026-02-21T10:00:00.000Z",
 			},
 		},
 		{
 			name: "invalid email",
-			response: Result{
-				State:    StateInvalid,
-				SubState: SubStateFailedNoMailbox,
+			response: verifyResponse{
+				Emails: []Result{
+					{
+						Email:    "bad@example.com",
+						Domain:   "example.com",
+						State:    StateEmailInvalid,
+						SubState: SubStateUnknownError,
+					},
+				},
+			},
+			want: Result{
+				Email:    "bad@example.com",
+				Domain:   "example.com",
+				State:    StateEmailInvalid,
+				SubState: SubStateUnknownError,
 			},
 		},
 		{
-			name: "risky email",
-			response: Result{
-				State:    StateRisky,
-				SubState: SubStateAcceptAll,
+			name: "accept_all email",
+			response: verifyResponse{
+				Emails: []Result{
+					{
+						Email:    "user@catchall.com",
+						Domain:   "catchall.com",
+						State:    StateAcceptAll,
+						SubState: SubStateEmailOK,
+					},
+				},
 			},
-		},
-		{
-			name: "unknown email",
-			response: Result{
-				State:    StateUnknown,
-				SubState: SubStateUnknown,
+			want: Result{
+				Email:    "user@catchall.com",
+				Domain:   "catchall.com",
+				State:    StateAcceptAll,
+				SubState: SubStateEmailOK,
 			},
 		},
 	}
@@ -67,22 +98,15 @@ func TestValidate(t *testing.T) {
 				if r.Method != http.MethodPost {
 					t.Errorf("expected POST, got %s", r.Method)
 				}
-				if r.URL.Path != "/api/v1/verify" {
-					t.Errorf("expected /api/v1/verify, got %s", r.URL.Path)
+				if r.URL.Path != "/api/v1/verify_inline" {
+					t.Errorf("expected /api/v1/verify_inline, got %s", r.URL.Path)
+				}
+				email := r.URL.Query().Get("email")
+				if email != "user@example.com" {
+					t.Errorf("expected email=user@example.com, got %s", email)
 				}
 				if r.Header.Get("Authorization") != "Bearer test-api-key" {
 					t.Errorf("expected Bearer test-api-key, got %s", r.Header.Get("Authorization"))
-				}
-				if r.Header.Get("Content-Type") != "application/json" {
-					t.Errorf("expected application/json, got %s", r.Header.Get("Content-Type"))
-				}
-
-				var req verifyRequest
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					t.Errorf("failed to decode request body: %v", err)
-				}
-				if req.Email != "user@example.com" {
-					t.Errorf("expected user@example.com, got %s", req.Email)
 				}
 
 				w.Header().Set("Content-Type", "application/json")
@@ -97,98 +121,124 @@ func TestValidate(t *testing.T) {
 				return
 			}
 
-			if result.State != tt.response.State {
-				t.Errorf("State = %q, want %q", result.State, tt.response.State)
+			if result.State != tt.want.State {
+				t.Errorf("State = %q, want %q", result.State, tt.want.State)
 			}
-			if result.SubState != tt.response.SubState {
-				t.Errorf("SubState = %q, want %q", result.SubState, tt.response.SubState)
+			if result.SubState != tt.want.SubState {
+				t.Errorf("SubState = %q, want %q", result.SubState, tt.want.SubState)
 			}
-			if result.FreeEmail != tt.response.FreeEmail {
-				t.Errorf("FreeEmail = %v, want %v", result.FreeEmail, tt.response.FreeEmail)
+			if result.Email != tt.want.Email {
+				t.Errorf("Email = %q, want %q", result.Email, tt.want.Email)
 			}
-			if result.Role != tt.response.Role {
-				t.Errorf("Role = %v, want %v", result.Role, tt.response.Role)
-			}
-			if result.Disposable != tt.response.Disposable {
-				t.Errorf("Disposable = %v, want %v", result.Disposable, tt.response.Disposable)
+			if result.Domain != tt.want.Domain {
+				t.Errorf("Domain = %q, want %q", result.Domain, tt.want.Domain)
 			}
 		})
 	}
 }
 
-func TestFormValidate(t *testing.T) {
-	t.Run("uses form API key", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/v1/form_verify" {
-				t.Errorf("expected /api/v1/form_verify, got %s", r.URL.Path)
-			}
-			if r.Header.Get("Authorization") != "Bearer form-test-key" {
-				t.Errorf("expected Bearer form-test-key, got %s", r.Header.Get("Authorization"))
-			}
+func TestValidateRealAPIFormat(t *testing.T) {
+	mockResponse := `{"emails":[{"address":"user@example.com","domain":"example.com","canonical":"user","mx_record":null,"first_name":null,"last_name":null,"email_state":"ok","email_sub_state":"email_ok","verified_at":"2026-02-21T10:00:00.000Z","did_you_mean":null}]}`
 
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(Result{State: StateValid, SubState: SubStateOK})
-		}))
-		defer srv.Close()
-
-		client := NewClient("test-api-key",
-			WithBaseURL(srv.URL),
-			WithFormAPIKey("form-test-key"),
-			WithMaxRetries(0),
-		)
-
-		result, err := client.FormValidate(context.Background(), "user@example.com")
-		if err != nil {
-			t.Fatalf("FormValidate() error = %v", err)
+	_, client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if result.State != StateValid {
-			t.Errorf("State = %q, want %q", result.State, StateValid)
+		if r.URL.Path != "/api/v1/verify_inline" {
+			t.Errorf("expected /api/v1/verify_inline, got %s", r.URL.Path)
 		}
+		email := r.URL.Query().Get("email")
+		if email != "user@example.com" {
+			t.Errorf("expected email=user@example.com, got %s", email)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(mockResponse))
 	})
 
-	t.Run("errors without form API key", func(t *testing.T) {
-		client := NewClient("test-api-key", WithMaxRetries(0))
+	result, err := client.Validate(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
 
-		_, err := client.FormValidate(context.Background(), "user@example.com")
-		if err == nil {
-			t.Fatal("expected error when form API key is not set")
-		}
-	})
+	if result.Email != "user@example.com" {
+		t.Errorf("Email = %q, want %q", result.Email, "user@example.com")
+	}
+	if result.Domain != "example.com" {
+		t.Errorf("Domain = %q, want %q", result.Domain, "example.com")
+	}
+	if result.Canonical != "user" {
+		t.Errorf("Canonical = %q, want %q", result.Canonical, "user")
+	}
+	if result.MxRecord != nil {
+		t.Errorf("MxRecord = %v, want nil", result.MxRecord)
+	}
+	if result.FirstName != nil {
+		t.Errorf("FirstName = %v, want nil", result.FirstName)
+	}
+	if result.LastName != nil {
+		t.Errorf("LastName = %v, want nil", result.LastName)
+	}
+	if result.State != "ok" {
+		t.Errorf("State = %q, want %q", result.State, "ok")
+	}
+	if result.SubState != "email_ok" {
+		t.Errorf("SubState = %q, want %q", result.SubState, "email_ok")
+	}
+	if result.VerifiedAt != "2026-02-21T10:00:00.000Z" {
+		t.Errorf("VerifiedAt = %q, want %q", result.VerifiedAt, "2026-02-21T10:00:00.000Z")
+	}
+	if result.Suggestion != nil {
+		t.Errorf("Suggestion = %v, want nil", result.Suggestion)
+	}
+	if !result.IsValid() {
+		t.Error("IsValid() = false, want true")
+	}
 }
 
 func TestAccount(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
+		mockResponse := `{"email":"team@company.com","name":"Team Lead","uuid":"a3828d19-1234-5678-9abc-def012345678","time_zone":"America/New_York","is_admin_role":true,"token":"test_token","api_keys":[],"account":{"name":"Company Inc","payment_plan":"pro","users":[]}}`
+
 		_, client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				t.Errorf("expected GET, got %s", r.Method)
 			}
-			if r.URL.Path != "/api/v1/account" {
-				t.Errorf("expected /api/v1/account, got %s", r.URL.Path)
+			if r.URL.Path != "/me" {
+				t.Errorf("expected /me, got %s", r.URL.Path)
 			}
 			if r.Header.Get("Authorization") != "Bearer test-api-key" {
 				t.Errorf("expected Bearer test-api-key, got %s", r.Header.Get("Authorization"))
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(Account{
-				Email:   "user@example.com",
-				Plan:    "pro",
-				Credits: 9542,
-			})
+			w.Write([]byte(mockResponse))
 		})
 
 		account, err := client.Account(context.Background())
 		if err != nil {
 			t.Fatalf("Account() error = %v", err)
 		}
-		if account.Email != "user@example.com" {
-			t.Errorf("Email = %q, want %q", account.Email, "user@example.com")
+		if account.Email != "team@company.com" {
+			t.Errorf("Email = %q, want %q", account.Email, "team@company.com")
 		}
-		if account.Plan != "pro" {
-			t.Errorf("Plan = %q, want %q", account.Plan, "pro")
+		if account.Name != "Team Lead" {
+			t.Errorf("Name = %q, want %q", account.Name, "Team Lead")
 		}
-		if account.Credits != 9542 {
-			t.Errorf("Credits = %d, want %d", account.Credits, 9542)
+		if account.UUID != "a3828d19-1234-5678-9abc-def012345678" {
+			t.Errorf("UUID = %q, want %q", account.UUID, "a3828d19-1234-5678-9abc-def012345678")
+		}
+		if account.TimeZone != "America/New_York" {
+			t.Errorf("TimeZone = %q, want %q", account.TimeZone, "America/New_York")
+		}
+		if !account.IsAdminRole {
+			t.Error("IsAdminRole = false, want true")
+		}
+		if account.Account.Name != "Company Inc" {
+			t.Errorf("Account.Name = %q, want %q", account.Account.Name, "Company Inc")
+		}
+		if account.Account.PaymentPlan != "pro" {
+			t.Errorf("Account.PaymentPlan = %q, want %q", account.Account.PaymentPlan, "pro")
 		}
 	})
 
@@ -280,6 +330,8 @@ func TestErrorHandling(t *testing.T) {
 func TestRetryBehavior(t *testing.T) {
 	t.Run("retries on 429", func(t *testing.T) {
 		var attempts int32
+		mockResponse := `{"emails":[{"address":"user@example.com","domain":"example.com","canonical":"user","mx_record":null,"first_name":null,"last_name":null,"email_state":"ok","email_sub_state":"email_ok","verified_at":"2026-02-21T10:00:00.000Z","did_you_mean":null}]}`
+
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			n := atomic.AddInt32(&attempts, 1)
 			if n <= 2 {
@@ -288,7 +340,7 @@ func TestRetryBehavior(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(Result{State: StateValid, SubState: SubStateOK})
+			w.Write([]byte(mockResponse))
 		}))
 		defer srv.Close()
 
@@ -301,8 +353,8 @@ func TestRetryBehavior(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate() error = %v", err)
 		}
-		if result.State != StateValid {
-			t.Errorf("State = %q, want %q", result.State, StateValid)
+		if result.State != StateOK {
+			t.Errorf("State = %q, want %q", result.State, StateOK)
 		}
 		if atomic.LoadInt32(&attempts) != 3 {
 			t.Errorf("attempts = %d, want 3", atomic.LoadInt32(&attempts))
@@ -311,6 +363,8 @@ func TestRetryBehavior(t *testing.T) {
 
 	t.Run("retries on 500", func(t *testing.T) {
 		var attempts int32
+		mockResponse := `{"emails":[{"address":"user@example.com","domain":"example.com","canonical":"user","mx_record":null,"first_name":null,"last_name":null,"email_state":"ok","email_sub_state":"email_ok","verified_at":"2026-02-21T10:00:00.000Z","did_you_mean":null}]}`
+
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			n := atomic.AddInt32(&attempts, 1)
 			if n <= 1 {
@@ -319,7 +373,7 @@ func TestRetryBehavior(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(Result{State: StateValid, SubState: SubStateOK})
+			w.Write([]byte(mockResponse))
 		}))
 		defer srv.Close()
 
@@ -332,8 +386,8 @@ func TestRetryBehavior(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate() error = %v", err)
 		}
-		if result.State != StateValid {
-			t.Errorf("State = %q, want %q", result.State, StateValid)
+		if result.State != StateOK {
+			t.Errorf("State = %q, want %q", result.State, StateOK)
 		}
 	})
 
@@ -393,9 +447,11 @@ func TestRetryBehavior(t *testing.T) {
 
 func TestOptions(t *testing.T) {
 	t.Run("custom base URL", func(t *testing.T) {
+		mockResponse := `{"emails":[{"address":"user@example.com","domain":"example.com","canonical":"user","mx_record":null,"first_name":null,"last_name":null,"email_state":"ok","email_sub_state":"email_ok","verified_at":"2026-02-21T10:00:00.000Z","did_you_mean":null}]}`
+
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(Result{State: StateValid})
+			w.Write([]byte(mockResponse))
 		}))
 		defer srv.Close()
 
@@ -408,8 +464,8 @@ func TestOptions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate() error = %v", err)
 		}
-		if result.State != StateValid {
-			t.Errorf("State = %q, want %q", result.State, StateValid)
+		if result.State != StateOK {
+			t.Errorf("State = %q, want %q", result.State, StateOK)
 		}
 	})
 
@@ -460,52 +516,55 @@ func TestOptions(t *testing.T) {
 
 func TestResultPredicates(t *testing.T) {
 	tests := []struct {
-		name       string
-		result     Result
-		isValid    bool
-		isInvalid  bool
-		isRisky    bool
-		isUnknown  bool
-		isFree     bool
-		isRole     bool
-		isDisp     bool
-		validRisky bool
+		name      string
+		result    Result
+		isValid   bool
+		isInvalid bool
+		isAccAll  bool
+		isDisp    bool
+		isRole    bool
 	}{
 		{
-			name: "valid free email",
+			name: "valid email",
 			result: Result{
-				State:     StateValid,
-				FreeEmail: true,
+				State:    StateOK,
+				SubState: SubStateEmailOK,
 			},
-			isValid:    true,
-			isFree:     true,
-			validRisky: true,
+			isValid: true,
 		},
 		{
 			name: "invalid email",
 			result: Result{
-				State: StateInvalid,
+				State:    StateEmailInvalid,
+				SubState: SubStateUnknownError,
 			},
 			isInvalid: true,
 		},
 		{
-			name: "risky role email",
+			name: "accept all email",
 			result: Result{
-				State: StateRisky,
-				Role:  true,
+				State:    StateAcceptAll,
+				SubState: SubStateEmailOK,
 			},
-			isRisky:    true,
-			isRole:     true,
-			validRisky: true,
+			isAccAll: true,
 		},
 		{
-			name: "unknown disposable email",
+			name: "disposable email",
 			result: Result{
-				State:      StateUnknown,
-				Disposable: true,
+				State:    StateOK,
+				SubState: SubStateIsDisposable,
 			},
-			isUnknown: true,
-			isDisp:    true,
+			isValid: true,
+			isDisp:  true,
+		},
+		{
+			name: "role email",
+			result: Result{
+				State:    StateOK,
+				SubState: SubStateIsRole,
+			},
+			isValid: true,
+			isRole:  true,
 		},
 	}
 
@@ -515,26 +574,17 @@ func TestResultPredicates(t *testing.T) {
 			if got := r.IsValid(); got != tt.isValid {
 				t.Errorf("IsValid() = %v, want %v", got, tt.isValid)
 			}
-			if got := r.IsValid(AllowRisky()); got != tt.validRisky {
-				t.Errorf("IsValid(AllowRisky()) = %v, want %v", got, tt.validRisky)
-			}
 			if got := r.IsInvalid(); got != tt.isInvalid {
 				t.Errorf("IsInvalid() = %v, want %v", got, tt.isInvalid)
 			}
-			if got := r.IsRisky(); got != tt.isRisky {
-				t.Errorf("IsRisky() = %v, want %v", got, tt.isRisky)
-			}
-			if got := r.IsUnknown(); got != tt.isUnknown {
-				t.Errorf("IsUnknown() = %v, want %v", got, tt.isUnknown)
-			}
-			if got := r.IsFreeEmail(); got != tt.isFree {
-				t.Errorf("IsFreeEmail() = %v, want %v", got, tt.isFree)
-			}
-			if got := r.IsRole(); got != tt.isRole {
-				t.Errorf("IsRole() = %v, want %v", got, tt.isRole)
+			if got := r.IsAcceptAll(); got != tt.isAccAll {
+				t.Errorf("IsAcceptAll() = %v, want %v", got, tt.isAccAll)
 			}
 			if got := r.IsDisposable(); got != tt.isDisp {
 				t.Errorf("IsDisposable() = %v, want %v", got, tt.isDisp)
+			}
+			if got := r.IsRole(); got != tt.isRole {
+				t.Errorf("IsRole() = %v, want %v", got, tt.isRole)
 			}
 		})
 	}
@@ -576,20 +626,19 @@ func TestAPIErrorFormat(t *testing.T) {
 }
 
 func TestSuggestionField(t *testing.T) {
+	suggestion := "user@gmail.com"
+	mockResponse := `{"emails":[{"address":"user@gmial.com","domain":"gmial.com","canonical":"user","mx_record":null,"first_name":null,"last_name":null,"email_state":"email_invalid","email_sub_state":"unknown_error","verified_at":"2026-02-21T10:00:00.000Z","did_you_mean":"user@gmail.com"}]}`
+
 	_, client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Result{
-			State:      StateInvalid,
-			SubState:   SubStateFailedSyntaxCheck,
-			Suggestion: "user@gmail.com",
-		})
+		w.Write([]byte(mockResponse))
 	})
 
 	result, err := client.Validate(context.Background(), "user@gmial.com")
 	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if result.Suggestion != "user@gmail.com" {
-		t.Errorf("Suggestion = %q, want %q", result.Suggestion, "user@gmail.com")
+	if result.Suggestion == nil || *result.Suggestion != suggestion {
+		t.Errorf("Suggestion = %v, want %q", result.Suggestion, suggestion)
 	}
 }
