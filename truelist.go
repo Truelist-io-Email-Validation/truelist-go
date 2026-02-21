@@ -11,13 +11,13 @@
 package truelist
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -30,7 +30,6 @@ const (
 // Client is the Truelist API client.
 type Client struct {
 	apiKey     string
-	formAPIKey string
 	baseURL    string
 	maxRetries int
 	httpClient *http.Client
@@ -61,13 +60,6 @@ func WithMaxRetries(n int) Option {
 	}
 }
 
-// WithFormAPIKey sets the form API key for frontend validation.
-func WithFormAPIKey(key string) Option {
-	return func(c *Client) {
-		c.formAPIKey = key
-	}
-}
-
 // WithHTTPClient sets a custom HTTP client.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
@@ -75,7 +67,7 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// NewClient creates a new Truelist API client with the given server API key.
+// NewClient creates a new Truelist API client with the given API key.
 func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:     apiKey,
@@ -89,45 +81,33 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	return c
 }
 
-type verifyRequest struct {
-	Email string `json:"email"`
+// verifyResponse is the raw API response wrapper for email validation.
+type verifyResponse struct {
+	Emails []Result `json:"emails"`
 }
 
-// Validate performs server-side email validation using the server API key.
+// Validate performs email validation using the API key.
 func (c *Client) Validate(ctx context.Context, email string) (*Result, error) {
-	return c.validate(ctx, "/api/v1/verify", c.apiKey, email)
-}
+	path := "/api/v1/verify_inline?email=" + url.QueryEscape(email)
 
-// FormValidate performs frontend email validation using the form API key.
-// A form API key must be set via WithFormAPIKey when creating the client.
-func (c *Client) FormValidate(ctx context.Context, email string) (*Result, error) {
-	if c.formAPIKey == "" {
-		return nil, fmt.Errorf("truelist: form API key not set; use WithFormAPIKey when creating the client")
-	}
-	return c.validate(ctx, "/api/v1/form_verify", c.formAPIKey, email)
-}
-
-func (c *Client) validate(ctx context.Context, path, token, email string) (*Result, error) {
-	body, err := json.Marshal(verifyRequest{Email: email})
-	if err != nil {
-		return nil, fmt.Errorf("truelist: failed to marshal request: %w", err)
-	}
-
-	respBody, err := c.doWithRetry(ctx, http.MethodPost, path, token, body)
+	respBody, err := c.doWithRetry(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	var result Result
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	var resp verifyResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return nil, fmt.Errorf("truelist: failed to decode response: %w", err)
 	}
-	return &result, nil
+	if len(resp.Emails) == 0 {
+		return nil, fmt.Errorf("truelist: empty response")
+	}
+	return &resp.Emails[0], nil
 }
 
-// Account retrieves account information using the server API key.
+// Account retrieves account information using the API key.
 func (c *Client) Account(ctx context.Context) (*Account, error) {
-	respBody, err := c.doWithRetry(ctx, http.MethodGet, "/api/v1/account", c.apiKey, nil)
+	respBody, err := c.doWithRetry(ctx, http.MethodGet, "/me", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +119,7 @@ func (c *Client) Account(ctx context.Context) (*Account, error) {
 	return &account, nil
 }
 
-func (c *Client) doWithRetry(ctx context.Context, method, path, token string, body []byte) ([]byte, error) {
+func (c *Client) doWithRetry(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
@@ -152,7 +132,7 @@ func (c *Client) doWithRetry(ctx context.Context, method, path, token string, bo
 			}
 		}
 
-		respBody, err := c.do(ctx, method, path, token, body)
+		respBody, err := c.do(ctx, method, path, body)
 		if err == nil {
 			return respBody, nil
 		}
@@ -175,23 +155,15 @@ func (c *Client) doWithRetry(ctx context.Context, method, path, token string, bo
 	return nil, lastErr
 }
 
-func (c *Client) do(ctx context.Context, method, path, token string, body []byte) ([]byte, error) {
-	url := c.baseURL + path
+func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	reqURL := c.baseURL + path
 
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("truelist: failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
