@@ -1,6 +1,10 @@
 # truelist-go
 
+[![Free tier](https://img.shields.io/badge/free_plan-100_validations-4A7C59?style=flat-square)](https://truelist.io/pricing)
 Go SDK for the [Truelist.io](https://truelist.io) email validation API.
+
+> **Start free** — 100 validations + 10 enhanced credits, no credit card required.
+> [Get your API key →](https://app.truelist.io/signup?utm_source=github&utm_medium=readme&utm_campaign=free-plan&utm_content=truelist-go)
 
 ## Installation
 
@@ -206,6 +210,10 @@ func TestMyValidation(t *testing.T) {
 }
 ```
 
+
+## Getting Started
+
+Sign up for a [free Truelist account](https://app.truelist.io/signup?utm_source=github&utm_medium=readme&utm_campaign=free-plan&utm_content=truelist-go) to get your API key. The free plan includes 100 validations and 10 enhanced credits — no credit card required.
 ## License
 
 MIT
